@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+
+# Logs
+*.log
+
+# Model files (large binaries — download separately, see README)
+models/
+
+# Generated transcripts (folder is created on install / at runtime)
+output/
+
+# macOS
+.DS_Store

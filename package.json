@@ -1,0 +1,29 @@
+{
+  "name": "transcriber",
+  "version": "2.0.0",
+  "description": "Local offline terminal transcriber: audio/video file -> text via whisper.cpp",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "transcription",
+    "whisper",
+    "whisper.cpp",
+    "offline",
+    "speech-to-text",
+    "cli",
+    "ffmpeg"
+  ],
+  "bin": {
+    "transcribe": "./transcribe.js"
+  },
+  "scripts": {
+    "start": "node transcribe.js",
+    "postinstall": "node -e \"require('fs').mkdirSync('output',{recursive:true})\""
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  }
+}
