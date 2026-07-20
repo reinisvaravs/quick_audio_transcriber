@@ -64,6 +64,30 @@ transcript goes to stdout and progress goes to stderr, so piping stays clean:
 node transcribe.js meeting.mp4 > meeting.txt
 ```
 
+### Transcribe a whole folder
+
+Point it at a **folder** and every audio/video file inside is transcribed. The
+transcripts are written to a **new sibling folder** named
+`<folder>-transcripts`, one `.txt` per input file:
+
+```bash
+node transcribe.js ~/recordings -en
+```
+
+```
+~/recordings/                 ~/recordings-transcripts/
+  ep01.mp3          ───▶        ep01.txt
+  ep02.m4a          ───▶        ep02.txt
+  clip.mp4          ───▶        clip.txt
+```
+
+Files are processed one at a time (progress is printed to stderr). A file that
+fails or has no speech is skipped without stopping the rest, and a summary of how
+many succeeded/failed is printed at the end. In folder mode nothing is copied to
+the clipboard and `output/` is not used — everything goes to the new folder.
+Only common audio/video extensions are picked up (`.mp3 .m4a .wav .flac .ogg
+.opus .aac .mp4 .mov .mkv .webm .avi …`); other files in the folder are ignored.
+
 ## Config (all optional, via `.env`)
 
 - `TRANSCRIBE_MODEL` — path to a whisper.cpp `.bin` (default: `models/ggml-large-v3-turbo.bin`)
