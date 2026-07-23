@@ -29,6 +29,15 @@ const MODEL =
 const OUTPUT_DIR = path.join(HERE, "output");
 // M3 = 4 performance + 4 efficiency cores; 4 threads keeps it snappy.
 const THREADS = process.env.TRANSCRIBE_THREADS || "4";
+// Instagram support: downreels.com's backend resolves a public IG post/reel to a
+// direct MP4. We call the same endpoint its web UI calls, download the video into
+// memory, and feed the bytes straight to ffmpeg — nothing is saved to disk.
+const IG_API =
+  process.env.INSTAGRAM_API || "https://api.zoraahub.com/fetch.php";
+// A browser-like User-Agent; the media host rejects some default clients.
+const HTTP_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 // Extensions we hand to ffmpeg when scanning a folder. ffmpeg reads far more,
 // but this keeps us from trying to "transcribe" random files (.txt, .jpg, ...).
 const MEDIA_EXTS = new Set([
@@ -63,7 +72,7 @@ function printHelp() {
   log(`transcribe — local, offline audio/video transcription (whisper.cpp)
 
 Usage:
-  node transcribe.js <file-or-folder> [language]
+  node transcribe.js <file-or-folder-or-instagram-url> [language]
 
 Language:
   -en          Force English
@@ -79,8 +88,16 @@ saved to output/<name>.txt.
 Pass a folder: every audio/video file inside is transcribed and each transcript
 is saved to a new sibling folder named "<folder>-transcripts/<name>.txt".
 
+Pass an Instagram URL: the public post/reel is downloaded into memory via
+downreels.com and transcribed. The transcript is printed, copied to your
+clipboard, and saved to output/<shortcode>.txt.
+
+  node transcribe.js https://www.instagram.com/reel/XXXXXXXXXXX/
+
 Works with any audio or video file ffmpeg can read (mp3, m4a, wav, mp4, mov, ...).
-For video, only the audio track is used. Runs fully offline — no API key, no cost.`);
+For video, only the audio track is used. Transcription runs fully offline — no API
+key, no cost. (Instagram mode fetches the video over the network, then transcribes
+it locally.)`);
 }
 
 // --- external binaries ------------------------------------------------------
@@ -151,6 +168,137 @@ async function transcribeOne(input, language, workDir) {
   } finally {
     fs.rmSync(wav, { force: true });
   }
+}
+
+// --- Instagram mode ---------------------------------------------------------
+
+function isInstagramUrl(s) {
+  return /^https?:\/\/(www\.)?instagram\.com\//i.test(s);
+}
+
+// Best-effort shortcode for the output filename, e.g. .../reel/ABC123/ -> ABC123.
+function instagramShortcode(url) {
+  const m = url.match(
+    /instagram\.com\/(?:[^/]+\/)?(?:reel|reels|p|tv)\/([A-Za-z0-9._-]+)/i
+  );
+  return m ? m[1] : "instagram-video";
+}
+
+// Ask downreels.com's backend to resolve a public IG URL to a direct MP4 link.
+async function resolveInstagram(pageUrl) {
+  let res;
+  try {
+    res = await fetch(IG_API, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: "https://downreels.com",
+        Referer: "https://downreels.com/",
+        "User-Agent": HTTP_UA,
+      },
+      body: JSON.stringify({ url: pageUrl }),
+    });
+  } catch (e) {
+    throw new Error(`could not reach the downloader service: ${e.message}`);
+  }
+
+  let data;
+  try {
+    data = await res.json();
+  } catch {
+    throw new Error(`downloader returned a non-JSON response (HTTP ${res.status}).`);
+  }
+
+  if (data.status !== "ok" || !Array.isArray(data.videos) || data.videos.length === 0)
+    throw new Error(
+      data.message ||
+        "no downloadable video found — the post may be private, deleted, or image-only."
+    );
+
+  const video = data.videos.find((v) => v && v.url && v.isVideo !== false) || data.videos[0];
+  if (!video || !video.url)
+    throw new Error("no video track in the post (it may be image-only).");
+  return video.url;
+}
+
+// Download a URL fully into memory. Videos are small enough (reels are seconds
+// to a couple minutes) that buffering is fine and keeps the MP4 off disk.
+async function downloadToBuffer(url) {
+  let res;
+  try {
+    res = await fetch(url, { headers: { "User-Agent": HTTP_UA } });
+  } catch (e) {
+    throw new Error(`failed to download the video: ${e.message}`);
+  }
+  if (!res.ok) throw new Error(`failed to download the video (HTTP ${res.status}).`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length === 0) throw new Error("the downloaded video was empty.");
+  return buf;
+}
+
+// Same as extractAudio, but the source is an in-memory MP4 fed via ffmpeg stdin.
+function extractAudioFromBuffer(buf, outWav) {
+  return new Promise((resolve, reject) => {
+    const p = spawn("ffmpeg", [
+      "-hide_banner", "-loglevel", "error", "-y",
+      "-i", "pipe:0",     // read the MP4 from stdin
+      "-vn",              // drop the video track
+      "-ac", "1",         // mono
+      "-ar", "16000",     // 16kHz — what whisper expects
+      "-c:a", "pcm_s16le", // 16-bit PCM WAV
+      outWav,
+    ]);
+    let err = "";
+    p.stderr.on("data", (d) => (err += d));
+    p.on("error", reject);
+    p.on("close", (code) =>
+      code === 0 ? resolve() : reject(new Error(err.trim() || `ffmpeg exited ${code}`))
+    );
+    // ffmpeg may close stdin early once it has the moov atom; swallow EPIPE.
+    p.stdin.on("error", () => {});
+    p.stdin.end(buf);
+  });
+}
+
+// Extract audio from an in-memory MP4 and transcribe it. The temp WAV whisper
+// needs is written to workDir and removed afterwards; the MP4 never touches disk.
+async function transcribeBuffer(buf, language, workDir) {
+  const wav = path.join(workDir, "audio.wav");
+  try {
+    await extractAudioFromBuffer(buf, wav);
+    const raw = await transcribe(wav, language);
+    return raw.replace(/\n{3,}/g, "\n\n").trim();
+  } finally {
+    fs.rmSync(wav, { force: true });
+  }
+}
+
+async function runInstagram(pageUrl, language, workDir) {
+  log(`Resolving Instagram video via downreels.com ...`);
+  const videoUrl = await resolveInstagram(pageUrl);
+
+  log(`Downloading video into memory ...`);
+  const buf = await downloadToBuffer(videoUrl);
+
+  log(
+    `Downloaded ${(buf.length / 1024 / 1024).toFixed(1)} MB. ` +
+      `Transcribing with ${path.basename(MODEL)} (Metal GPU) ...`
+  );
+  const transcript = await transcribeBuffer(buf, language, workDir);
+  if (!transcript) die("no speech detected in the video.");
+
+  // stdout = clean transcript (pipe-friendly).
+  process.stdout.write(transcript + "\n");
+
+  // Save to output/<shortcode>.txt.
+  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+  const outFile = path.join(OUTPUT_DIR, `${instagramShortcode(pageUrl)}.txt`);
+  fs.writeFileSync(outFile, transcript + "\n");
+  log(`\nSaved to ${path.relative(HERE, outFile)}`);
+
+  // Copy to clipboard.
+  const pb = spawnSync("pbcopy", { input: transcript });
+  if (pb.status === 0) log("Copied to clipboard.");
 }
 
 // --- single-file mode -------------------------------------------------------
@@ -235,20 +383,31 @@ async function main() {
     process.exit(args.input ? 0 : 1);
   }
 
-  const input = path.resolve(args.input);
-  if (!fs.existsSync(input)) die(`path not found: ${input}`);
+  const rawInput = args.input;
+  const igMode = isInstagramUrl(rawInput);
+
+  // A non-Instagram http(s) URL isn't a local path and isn't supported.
+  if (!igMode && /^https?:\/\//i.test(rawInput))
+    die(`only Instagram URLs are supported for download; got: ${rawInput}`);
+
   if (!fs.existsSync(MODEL))
     die(`model not found: ${MODEL}\nDownload it (see README) or set TRANSCRIBE_MODEL in .env.`);
 
   requireBinary("ffmpeg", "Install it: brew install ffmpeg");
   requireBinary("whisper-cli", "Install it: brew install whisper-cpp");
 
-  const isDir = fs.statSync(input).isDirectory();
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "transcriber-"));
 
   try {
-    if (isDir) await runFolder(input, args.language, workDir);
-    else await runFile(input, args.language, workDir);
+    if (igMode) {
+      await runInstagram(rawInput, args.language, workDir);
+    } else {
+      const input = path.resolve(rawInput);
+      if (!fs.existsSync(input)) die(`path not found: ${input}`);
+      const isDir = fs.statSync(input).isDirectory();
+      if (isDir) await runFolder(input, args.language, workDir);
+      else await runFile(input, args.language, workDir);
+    }
   } catch (err) {
     die(err?.message || String(err));
   } finally {

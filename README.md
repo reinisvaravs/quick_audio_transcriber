@@ -1,9 +1,9 @@
 # transcriber
 
-Local, **fully offline** terminal tool that transcribes any audio **or video** file
-using a local whisper.cpp model — Metal-accelerated on Apple Silicon. No API key,
-no cost, nothing leaves your machine. The transcript is printed, copied to your
-clipboard, and saved to `output/`.
+Local terminal tool that transcribes any audio **or video** file — or a public
+**Instagram** post/reel — using a local whisper.cpp model, Metal-accelerated on
+Apple Silicon. Transcription runs offline with no API key or cost; the transcript
+is printed, copied to your clipboard, and saved to `output/`.
 
 For video files, only the audio track is used (the video is ignored).
 
@@ -64,6 +64,25 @@ transcript goes to stdout and progress goes to stderr, so piping stays clean:
 node transcribe.js meeting.mp4 > meeting.txt
 ```
 
+### Transcribe an Instagram post or reel
+
+Pass an Instagram URL instead of a file and the public video is downloaded **into
+memory** via [downreels.com](https://downreels.com/en1/), then transcribed locally:
+
+```bash
+node transcribe.js https://www.instagram.com/reel/XXXXXXXXXXX/ -en
+```
+
+The video is streamed straight into `ffmpeg` — the MP4 is never written to disk.
+The transcript is printed, copied to your clipboard, and saved to
+`output/<shortcode>.txt` (e.g. `output/Cvuh19eNWv_.txt`). Only **public** posts
+work; private, deleted, or image-only posts return an error.
+
+> Unlike file/folder mode, this step fetches the video over the network (the
+> downloader resolves Instagram's CDN link for you). The transcription itself
+> still runs fully offline. The resolver endpoint can be overridden with
+> `INSTAGRAM_API` in `.env`.
+
 ### Transcribe a whole folder
 
 Point it at a **folder** and every audio/video file inside is transcribed. The
@@ -92,6 +111,8 @@ Only common audio/video extensions are picked up (`.mp3 .m4a .wav .flac .ogg
 
 - `TRANSCRIBE_MODEL` — path to a whisper.cpp `.bin` (default: `models/ggml-large-v3-turbo.bin`)
 - `TRANSCRIBE_THREADS` — default `4`
+- `INSTAGRAM_API` — endpoint that resolves an Instagram URL to a direct MP4
+  (default: downreels.com's backend). Only needed if that service changes.
 
 ## Performance
 
