@@ -56,13 +56,17 @@ const die = (msg) => {
 // --- arg parsing ------------------------------------------------------------
 
 function parseArgs(argv) {
-  const args = { input: null, language: "auto" };
+  const args = { input: null, language: "auto", outDir: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "-en") args.language = "en";
     else if (a === "-lv") args.language = "lv";
     else if (a === "--help" || a === "-h") args.help = true;
-    else if (!a.startsWith("-") && !args.input) args.input = a;
+    else if (a === "-o" || a === "--out") {
+      const next = argv[++i];
+      if (!next) die(`${a} needs a directory path`);
+      args.outDir = path.resolve(next);
+    } else if (!a.startsWith("-") && !args.input) args.input = a;
     else die(`unknown argument: ${a}`);
   }
   return args;
@@ -79,14 +83,19 @@ Language:
   -lv          Force Latvian
   (none)       Auto-detect (default)
 
+Output:
+  -o, --out <dir>   Save transcripts to <dir> instead of the default location.
+                    Created if it doesn't exist. Works in every mode.
+
 Other:
   -h, --help   Show this help
 
 Pass a single file: the transcript is printed, copied to your clipboard, and
-saved to output/<name>.txt.
+saved to output/<name>.txt (or <dir>/<name>.txt with -o).
 
 Pass a folder: every audio/video file inside is transcribed and each transcript
-is saved to a new sibling folder named "<folder>-transcripts/<name>.txt".
+is saved to a new sibling folder named "<folder>-transcripts/<name>.txt"
+(or to <dir>/<name>.txt with -o).
 
 Pass an Instagram URL: the public post/reel is downloaded into memory via
 downreels.com and transcribed. The transcript is printed, copied to your
@@ -273,7 +282,7 @@ async function transcribeBuffer(buf, language, workDir) {
   }
 }
 
-async function runInstagram(pageUrl, language, workDir) {
+async function runInstagram(pageUrl, language, workDir, outDir) {
   log(`Resolving Instagram video via downreels.com ...`);
   const videoUrl = await resolveInstagram(pageUrl);
 
@@ -290,9 +299,10 @@ async function runInstagram(pageUrl, language, workDir) {
   // stdout = clean transcript (pipe-friendly).
   process.stdout.write(transcript + "\n");
 
-  // Save to output/<shortcode>.txt.
-  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-  const outFile = path.join(OUTPUT_DIR, `${instagramShortcode(pageUrl)}.txt`);
+  // Save to <outDir>/<shortcode>.txt (default: output/).
+  const destDir = outDir || OUTPUT_DIR;
+  fs.mkdirSync(destDir, { recursive: true });
+  const outFile = path.join(destDir, `${instagramShortcode(pageUrl)}.txt`);
   fs.writeFileSync(outFile, transcript + "\n");
   log(`\nSaved to ${path.relative(HERE, outFile)}`);
 
@@ -303,7 +313,7 @@ async function runInstagram(pageUrl, language, workDir) {
 
 // --- single-file mode -------------------------------------------------------
 
-async function runFile(input, language, workDir) {
+async function runFile(input, language, workDir, outDir) {
   log(`Extracting audio from ${path.basename(input)} ...`);
   log(`Transcribing with ${path.basename(MODEL)} (Metal GPU) ...`);
   const transcript = await transcribeOne(input, language, workDir);
@@ -312,10 +322,11 @@ async function runFile(input, language, workDir) {
   // stdout = clean transcript (pipe-friendly).
   process.stdout.write(transcript + "\n");
 
-  // Always save to output/<input-name>.txt.
-  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+  // Always save to <outDir>/<input-name>.txt (default: output/).
+  const destDir = outDir || OUTPUT_DIR;
+  fs.mkdirSync(destDir, { recursive: true });
   const base = path.basename(input, path.extname(input));
-  const outFile = path.join(OUTPUT_DIR, `${base}.txt`);
+  const outFile = path.join(destDir, `${base}.txt`);
   fs.writeFileSync(outFile, transcript + "\n");
   log(`\nSaved to ${path.relative(HERE, outFile)}`);
 
@@ -326,7 +337,7 @@ async function runFile(input, language, workDir) {
 
 // --- folder mode ------------------------------------------------------------
 
-async function runFolder(dir, language, workDir) {
+async function runFolder(dir, language, workDir, outDir) {
   const entries = fs
     .readdirSync(dir, { withFileTypes: true })
     .filter((e) => e.isFile() && MEDIA_EXTS.has(path.extname(e.name).toLowerCase()))
@@ -336,14 +347,13 @@ async function runFolder(dir, language, workDir) {
   if (entries.length === 0)
     die(`no audio or video files found in folder: ${dir}`);
 
-  // New sibling folder: "<folder>-transcripts" (next to the input folder).
-  const outDir = path.join(
-    path.dirname(dir),
-    `${path.basename(dir)}-transcripts`
-  );
-  fs.mkdirSync(outDir, { recursive: true });
+  // Default: a new sibling folder "<folder>-transcripts" next to the input
+  // folder. With -o, use the given directory instead.
+  const destDir =
+    outDir || path.join(path.dirname(dir), `${path.basename(dir)}-transcripts`);
+  fs.mkdirSync(destDir, { recursive: true });
 
-  log(`Found ${entries.length} file(s). Writing transcripts to ${outDir}\n`);
+  log(`Found ${entries.length} file(s). Writing transcripts to ${destDir}\n`);
 
   let ok = 0;
   let failed = 0;
@@ -355,7 +365,7 @@ async function runFolder(dir, language, workDir) {
       log(`${label} — transcribing ...`);
       const transcript = await transcribeOne(input, language, workDir);
       const base = path.basename(name, path.extname(name));
-      const outFile = path.join(outDir, `${base}.txt`);
+      const outFile = path.join(destDir, `${base}.txt`);
       if (!transcript) {
         log(`${label} — no speech detected, skipped.`);
         failed++;
@@ -371,7 +381,7 @@ async function runFolder(dir, language, workDir) {
   }
 
   log(`\nDone. ${ok} transcribed, ${failed} skipped/failed.`);
-  log(`Transcripts are in ${outDir}`);
+  log(`Transcripts are in ${destDir}`);
 }
 
 // --- main -------------------------------------------------------------------
@@ -400,13 +410,13 @@ async function main() {
 
   try {
     if (igMode) {
-      await runInstagram(rawInput, args.language, workDir);
+      await runInstagram(rawInput, args.language, workDir, args.outDir);
     } else {
       const input = path.resolve(rawInput);
       if (!fs.existsSync(input)) die(`path not found: ${input}`);
       const isDir = fs.statSync(input).isDirectory();
-      if (isDir) await runFolder(input, args.language, workDir);
-      else await runFile(input, args.language, workDir);
+      if (isDir) await runFolder(input, args.language, workDir, args.outDir);
+      else await runFile(input, args.language, workDir, args.outDir);
     }
   } catch (err) {
     die(err?.message || String(err));
