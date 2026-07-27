@@ -121,8 +121,10 @@ Files are processed one at a time (progress is printed to stderr). A file that
 fails or has no speech is skipped without stopping the rest, and a summary of how
 many succeeded/failed is printed at the end. In folder mode nothing is copied to
 the clipboard and `output/` is not used — everything goes to the new folder.
-Only common audio/video extensions are picked up (`.mp3 .m4a .wav .flac .ogg
-.opus .aac .mp4 .mov .mkv .webm .avi …`); other files in the folder are ignored.
+Only audio/video extensions are picked up (`.mp3 .m4a .wav .flac .ogg .oga
+.opus .aac .wma .aiff .caf .amr .ac3 .mp4 .mov .mkv .webm .avi .3gp …` — the
+full list is in [`formats.js`](formats.js)); other files in the folder are
+ignored.
 
 ## Config (all optional, via `.env`)
 
@@ -150,8 +152,13 @@ whole interface.
 - **Silent on anything else.** Text, photos, stickers, links, commands: no reply.
   Only voice notes, audio, video, video notes, and documents with an audio/video
   type are acted on.
-- **No local dependencies.** No ffmpeg, no whisper.cpp, no model download — the
-  file goes straight from Telegram to the OpenAI API.
+- **Any format.** The OpenAI endpoint only accepts ten containers (`flac m4a mp3
+  mp4 mpeg mpga oga ogg wav webm`). Anything else — `.opus` and `.amr` voice
+  notes, `.aiff`/`.caf` from Apple gear, `.wma` from Windows, `.mkv`/`.mov`/
+  `.avi` recordings — is converted to 16 kHz mono MP3 first and then sent.
+- **Nothing to install.** No whisper.cpp, no model download. ffmpeg comes in as
+  the `ffmpeg-static` npm package, so `npm ci` is the whole setup — including on
+  Render. (Set `FFMPEG_PATH` to use a system ffmpeg instead.)
 
 Long transcripts are split across messages; very long ones arrive as a `.txt`
 attachment. Caption a file with `-en` or `-lv` to force that language for it

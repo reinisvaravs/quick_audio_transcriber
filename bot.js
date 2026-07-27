@@ -13,7 +13,13 @@
 
 import "dotenv/config";
 import http from "node:http";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawn } from "node:child_process";
 import OpenAI, { toFile } from "openai";
+import ffmpegPath from "ffmpeg-static";
+import { MEDIA_EXTS, extOf, needsTranscode } from "./formats.js";
 
 // --- config -----------------------------------------------------------------
 
@@ -58,11 +64,12 @@ const MSG_LIMIT = 3900;
 // Past this, a wall of chunked messages is worse than a file attachment.
 const DOC_THRESHOLD = 3900 * 4;
 
-// Extensions we accept when a file arrives as a plain document with no mime type.
-const MEDIA_EXTS = new Set([
-  ".mp3", ".m4a", ".wav", ".flac", ".ogg", ".oga", ".opus", ".aac", ".wma", ".aiff",
-  ".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".wmv", ".3gp",
-]);
+// Which extensions count as media when a file arrives as a plain document lives
+// in formats.js, shared with the CLI.
+
+// ffmpeg-static ships a prebuilt binary, so this works on Render too — no
+// system package needed. FFMPEG_PATH overrides it if you'd rather use your own.
+const FFMPEG = process.env.FFMPEG_PATH || ffmpegPath;
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
@@ -169,9 +176,10 @@ function extractMedia(msg) {
     const d = msg.document;
     const mime = (d.mime_type || "").toLowerCase();
     const name = d.file_name || "file";
-    const ext = name.includes(".") ? name.slice(name.lastIndexOf(".")).toLowerCase() : "";
     const looksLikeMedia =
-      mime.startsWith("audio/") || mime.startsWith("video/") || MEDIA_EXTS.has(ext);
+      mime.startsWith("audio/") ||
+      mime.startsWith("video/") ||
+      MEDIA_EXTS.has(extOf(name));
     if (looksLikeMedia)
       return { fileId: d.file_id, size: d.file_size, name };
   }
@@ -185,6 +193,57 @@ function languageFor(msg) {
   const m = caption.match(/(?:^|\s)-([a-z]{2})(?:\s|$)/);
   if (m) return m[1];
   return LANGUAGE;
+}
+
+// --- format normalisation ---------------------------------------------------
+
+// The OpenAI endpoint accepts only ten containers (see OPENAI_EXTS), and picks
+// its decoder from the filename extension. Plenty of everyday files fall
+// outside that set — .opus and .amr voice notes, .aiff and .caf from Apple
+// gear, .wma from Windows, .mkv/.mov/.avi screen and camera recordings — so we
+// run those through ffmpeg first.
+//
+// Output is 16 kHz mono MP3: speech loses nothing at that rate, and it shrinks
+// a 20 MB video down to a couple of MB, which keeps us clear of the API's own
+// 25 MB upload ceiling.
+function transcodeToMp3(buf, ext) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tg-transcode-"));
+  // Keep the original extension on the temp file — some demuxers (and ffmpeg's
+  // probe) do better with the hint. A temp *file* rather than a pipe matters
+  // for .mov/.mp4 whose index sits at the end and needs seeking.
+  const src = path.join(dir, `input${ext || ""}`);
+  const dst = path.join(dir, "audio.mp3");
+
+  return new Promise((resolve, reject) => {
+    fs.writeFileSync(src, buf);
+    const p = spawn(FFMPEG, [
+      "-hide_banner", "-loglevel", "error", "-y",
+      "-i", src,
+      "-vn",            // drop any video track
+      "-ac", "1",       // mono
+      "-ar", "16000",   // 16 kHz — speech is band-limited anyway
+      "-b:a", "64k",
+      dst,
+    ]);
+    let err = "";
+    p.stderr.on("data", (d) => (err += d));
+    p.on("error", reject);
+    p.on("close", (code) => {
+      if (code !== 0)
+        return reject(new Error(err.trim().split("\n").pop() || `ffmpeg exited ${code}`));
+      resolve(fs.readFileSync(dst));
+    });
+  }).finally(() => fs.rmSync(dir, { recursive: true, force: true }));
+}
+
+// Return { buf, filename } ready to upload, converting when we have to.
+async function prepareForUpload(buf, filename) {
+  if (!needsTranscode(filename)) return { buf, filename };
+  const ext = extOf(filename);
+  log(`converting ${ext || "unknown format"} -> mp3 (${buf.length} bytes)`);
+  const out = await transcodeToMp3(buf, ext);
+  if (out.length === 0) throw new Error("the converted audio was empty");
+  return { buf: out, filename: "audio.mp3" };
 }
 
 // --- transcription ----------------------------------------------------------
@@ -265,13 +324,13 @@ async function handleUpdate(update) {
     log(`transcribing ${media.name} (${media.size ?? "?"} bytes) for ${from}`);
     const { buf, path: tgPath } = await downloadTelegramFile(media.fileId);
     // Trust Telegram's stored extension over the client-supplied filename —
-    // OpenAI picks its decoder from the extension.
-    const ext = tgPath.includes(".") ? tgPath.slice(tgPath.lastIndexOf(".")) : "";
-    const filename = ext && !media.name.toLowerCase().endsWith(ext.toLowerCase())
-      ? `audio${ext}`
-      : media.name;
+    // it reflects what Telegram actually holds, and the decoder is chosen from
+    // the extension (both by ffmpeg's probe and by the OpenAI endpoint).
+    const ext = extOf(tgPath);
+    const named = ext && extOf(media.name) !== ext ? `audio${ext}` : media.name;
 
-    const transcript = await transcribe(buf, filename, languageFor(msg));
+    const ready = await prepareForUpload(buf, named);
+    const transcript = await transcribe(ready.buf, ready.filename, languageFor(msg));
 
     if (!transcript) {
       await editOrSend(chatId, status, "No speech detected in that file.", msg.message_id);
@@ -405,6 +464,10 @@ async function usePolling() {
 async function main() {
   const me = await tg("getMe", {});
   log(`starting @${me.username} — model ${MODEL}, ${ALLOWED_IDS.size} allowed user(s)`);
+
+  // Not fatal: the ten formats OpenAI takes directly still work without it.
+  if (!FFMPEG || !fs.existsSync(FFMPEG))
+    log("warning: no ffmpeg binary found — formats needing conversion will fail");
 
   if (PUBLIC_URL) {
     startServer();

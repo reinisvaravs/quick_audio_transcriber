@@ -17,6 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
+import { MEDIA_EXTS } from "./formats.js";
 
 // --- config -----------------------------------------------------------------
 
@@ -38,12 +39,9 @@ const IG_API =
 const HTTP_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-// Extensions we hand to ffmpeg when scanning a folder. ffmpeg reads far more,
-// but this keeps us from trying to "transcribe" random files (.txt, .jpg, ...).
-const MEDIA_EXTS = new Set([
-  ".mp3", ".m4a", ".wav", ".flac", ".ogg", ".opus", ".aac", ".wma", ".aiff",
-  ".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".wmv", ".3gp",
-]);
+// Extensions we hand to ffmpeg when scanning a folder (see formats.js). ffmpeg
+// reads far more, but this keeps us from trying to "transcribe" random files
+// (.txt, .jpg, ...).
 
 // --- tiny logger (all progress goes to stderr so stdout stays clean) --------
 
@@ -337,6 +335,16 @@ async function runFile(input, language, workDir, outDir) {
 
 // --- folder mode ------------------------------------------------------------
 
+// <destDir>/<base>.txt, or <base>-2.txt, -3.txt … if that name is taken. A
+// folder holding the same recording as talk.m4a and talk.wav would otherwise
+// have the second transcript quietly overwrite the first.
+function uniquePath(destDir, base) {
+  let candidate = path.join(destDir, `${base}.txt`);
+  for (let n = 2; fs.existsSync(candidate); n++)
+    candidate = path.join(destDir, `${base}-${n}.txt`);
+  return candidate;
+}
+
 async function runFolder(dir, language, workDir, outDir) {
   const entries = fs
     .readdirSync(dir, { withFileTypes: true })
@@ -364,8 +372,7 @@ async function runFolder(dir, language, workDir, outDir) {
     try {
       log(`${label} — transcribing ...`);
       const transcript = await transcribeOne(input, language, workDir);
-      const base = path.basename(name, path.extname(name));
-      const outFile = path.join(destDir, `${base}.txt`);
+      const outFile = uniquePath(destDir, path.basename(name, path.extname(name)));
       if (!transcript) {
         log(`${label} — no speech detected, skipped.`);
         failed++;
