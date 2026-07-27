@@ -1,0 +1,29 @@
+# Render blueprint for the Telegram bot (bot.js).
+# The local CLI (transcribe.js) is not deployed — it needs whisper.cpp + ffmpeg
+# on the machine and runs entirely on your own hardware.
+#
+# Deploy: push this repo to GitHub, then in Render pick "New > Blueprint".
+# Set the three secret values in the dashboard (they are marked sync: false).
+
+services:
+  - type: web
+    name: quick-audio-transcriber-bot
+    runtime: node
+    plan: free
+    buildCommand: npm ci --omit=dev
+    startCommand: node bot.js
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      # Set these in the Render dashboard — never commit them.
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: TELEGRAM_ALLOWED_IDS
+        sync: false
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: OPENAI_TRANSCRIBE_MODEL
+        value: gpt-4o-transcribe

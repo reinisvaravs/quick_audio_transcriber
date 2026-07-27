@@ -1,7 +1,7 @@
 {
-  "name": "transcriber",
+  "name": "quick_audio_transcriber",
   "version": "2.0.0",
-  "description": "Local offline terminal transcriber: audio/video file -> text via whisper.cpp",
+  "description": "Two transcribers, one codebase: an offline whisper.cpp CLI, and a Telegram bot backed by the OpenAI API",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -11,19 +11,25 @@
     "offline",
     "speech-to-text",
     "cli",
-    "ffmpeg"
+    "ffmpeg",
+    "telegram",
+    "telegram-bot",
+    "openai"
   ],
   "bin": {
     "transcribe": "./transcribe.js"
   },
   "scripts": {
-    "start": "node transcribe.js",
+    "start": "node bot.js",
+    "bot": "node bot.js",
+    "cli": "node transcribe.js",
     "postinstall": "node -e \"require('fs').mkdirSync('output',{recursive:true})\""
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "openai": "^6.49.0"
   }
 }
