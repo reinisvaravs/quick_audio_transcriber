@@ -39,8 +39,13 @@ export const MEDIA_EXTS = new Set([...AUDIO_EXTS, ...VIDEO_EXTS]);
 
 // The only extensions the OpenAI transcription endpoint accepts. Anything else
 // has to be transcoded first, no matter how ordinary the codec inside is.
+//
+// .oga is documented as supported but the endpoint rejects it in practice
+// ("400 Unsupported file format oga"), and Telegram stores every Opus/Ogg
+// upload — voice notes, WhatsApp .opus exports — under that extension. Leaving
+// it out sends those through ffmpeg, which is where they belonged anyway.
 export const OPENAI_EXTS = new Set([
-  ".flac", ".m4a", ".mp3", ".mp4", ".mpeg", ".mpga", ".oga", ".ogg", ".wav",
+  ".flac", ".m4a", ".mp3", ".mp4", ".mpeg", ".mpga", ".ogg", ".wav",
   ".webm",
 ]);
 

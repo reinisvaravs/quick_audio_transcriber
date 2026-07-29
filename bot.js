@@ -380,10 +380,35 @@ async function editOrSend(chatId, status, text, replyTo) {
 
 // --- webhook server (Render) ------------------------------------------------
 
+// This host only exists to receive Telegram webhooks, so "/" is just a note
+// explaining that to whoever opens the URL directly.
+const LANDING_HTML = `<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transcriber bot</title>
+<body style="max-width:34rem;margin:4rem auto;padding:0 1.25rem;font:16px/1.6 system-ui,sans-serif">
+<h1 style="font-size:1.5rem">Transcriber bot</h1>
+<p>This is the webhook server for a Telegram bot that turns speech into text.
+Send it a voice note, audio file, video, video note, or any audio/video file
+sent as a document, and it replies with a transcript. Files that the
+transcription API can't read directly are converted with ffmpeg first, so
+formats like Opus, AMR, CAF, WMA, MOV and MKV all work. Telegram caps bot
+downloads at 20 MB. Add a caption like <code>-en</code> or <code>-lv</code> to
+force a language instead of letting it auto-detect; long transcripts come back
+as a <code>.txt</code> file rather than a message.</p>
+<p>There is nothing to use on this page — the bot lives in Telegram.</p>
+</body>`;
+
 function startServer() {
   const server = http.createServer((req, res) => {
     if (req.method === "GET") {
-      // Render's health check, and a handy "is it awake" URL.
+      // "/" explains what this thing is, for anyone who lands on the Render URL.
+      // Every other GET stays a bare "ok" — that's the health check's job.
+      if (req.url.split("?")[0] === "/") {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(LANDING_HTML);
+        return;
+      }
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end("ok");
       return;
