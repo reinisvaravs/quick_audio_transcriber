@@ -18,6 +18,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { MEDIA_EXTS } from "./formats.js";
+import {
+  isInstagramUrl,
+  instagramShortcode,
+  fetchInstagramVideo,
+} from "./instagram.js";
 
 // --- config -----------------------------------------------------------------
 
@@ -30,15 +35,10 @@ const MODEL =
 const OUTPUT_DIR = path.join(HERE, "output");
 // M3 = 4 performance + 4 efficiency cores; 4 threads keeps it snappy.
 const THREADS = process.env.TRANSCRIBE_THREADS || "4";
-// Instagram support: downreels.com's backend resolves a public IG post/reel to a
-// direct MP4. We call the same endpoint its web UI calls, download the video into
-// memory, and feed the bytes straight to ffmpeg — nothing is saved to disk.
-const IG_API =
-  process.env.INSTAGRAM_API || "https://api.zoraahub.com/fetch.php";
-// A browser-like User-Agent; the media host rejects some default clients.
-const HTTP_UA =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
-  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+// Instagram support lives in instagram.js, shared with the bot: it resolves a
+// public post/reel to a direct MP4 and downloads it into memory, so the video
+// is fed straight to ffmpeg and never saved to disk.
+//
 // Extensions we hand to ffmpeg when scanning a folder (see formats.js). ffmpeg
 // reads far more, but this keeps us from trying to "transcribe" random files
 // (.txt, .jpg, ...).
@@ -179,70 +179,6 @@ async function transcribeOne(input, language, workDir) {
 
 // --- Instagram mode ---------------------------------------------------------
 
-function isInstagramUrl(s) {
-  return /^https?:\/\/(www\.)?instagram\.com\//i.test(s);
-}
-
-// Best-effort shortcode for the output filename, e.g. .../reel/ABC123/ -> ABC123.
-function instagramShortcode(url) {
-  const m = url.match(
-    /instagram\.com\/(?:[^/]+\/)?(?:reel|reels|p|tv)\/([A-Za-z0-9._-]+)/i
-  );
-  return m ? m[1] : "instagram-video";
-}
-
-// Ask downreels.com's backend to resolve a public IG URL to a direct MP4 link.
-async function resolveInstagram(pageUrl) {
-  let res;
-  try {
-    res = await fetch(IG_API, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Origin: "https://downreels.com",
-        Referer: "https://downreels.com/",
-        "User-Agent": HTTP_UA,
-      },
-      body: JSON.stringify({ url: pageUrl }),
-    });
-  } catch (e) {
-    throw new Error(`could not reach the downloader service: ${e.message}`);
-  }
-
-  let data;
-  try {
-    data = await res.json();
-  } catch {
-    throw new Error(`downloader returned a non-JSON response (HTTP ${res.status}).`);
-  }
-
-  if (data.status !== "ok" || !Array.isArray(data.videos) || data.videos.length === 0)
-    throw new Error(
-      data.message ||
-        "no downloadable video found — the post may be private, deleted, or image-only."
-    );
-
-  const video = data.videos.find((v) => v && v.url && v.isVideo !== false) || data.videos[0];
-  if (!video || !video.url)
-    throw new Error("no video track in the post (it may be image-only).");
-  return video.url;
-}
-
-// Download a URL fully into memory. Videos are small enough (reels are seconds
-// to a couple minutes) that buffering is fine and keeps the MP4 off disk.
-async function downloadToBuffer(url) {
-  let res;
-  try {
-    res = await fetch(url, { headers: { "User-Agent": HTTP_UA } });
-  } catch (e) {
-    throw new Error(`failed to download the video: ${e.message}`);
-  }
-  if (!res.ok) throw new Error(`failed to download the video (HTTP ${res.status}).`);
-  const buf = Buffer.from(await res.arrayBuffer());
-  if (buf.length === 0) throw new Error("the downloaded video was empty.");
-  return buf;
-}
-
 // Same as extractAudio, but the source is an in-memory MP4 fed via ffmpeg stdin.
 function extractAudioFromBuffer(buf, outWav) {
   return new Promise((resolve, reject) => {
@@ -282,10 +218,7 @@ async function transcribeBuffer(buf, language, workDir) {
 
 async function runInstagram(pageUrl, language, workDir, outDir) {
   log(`Resolving Instagram video via downreels.com ...`);
-  const videoUrl = await resolveInstagram(pageUrl);
-
-  log(`Downloading video into memory ...`);
-  const buf = await downloadToBuffer(videoUrl);
+  const buf = await fetchInstagramVideo(pageUrl);
 
   log(
     `Downloaded ${(buf.length / 1024 / 1024).toFixed(1)} MB. ` +
@@ -403,9 +336,14 @@ async function main() {
   const rawInput = args.input;
   const igMode = isInstagramUrl(rawInput);
 
-  // A non-Instagram http(s) URL isn't a local path and isn't supported.
+  // A URL we can't resolve to a video isn't a local path either. Instagram
+  // links to a profile or a story land here too — only posts, reels and IGTV
+  // carry a video we can fetch.
   if (!igMode && /^https?:\/\//i.test(rawInput))
-    die(`only Instagram URLs are supported for download; got: ${rawInput}`);
+    die(
+      `only Instagram post/reel URLs are supported for download ` +
+        `(instagram.com/p/... , /reel/... , /tv/...); got: ${rawInput}`
+    );
 
   if (!fs.existsSync(MODEL))
     die(`model not found: ${MODEL}\nDownload it (see README) or set TRANSCRIBE_MODEL in .env.`);

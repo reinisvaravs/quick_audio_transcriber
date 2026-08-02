@@ -20,6 +20,7 @@ import { spawn } from "node:child_process";
 import OpenAI, { toFile } from "openai";
 import ffmpegPath from "ffmpeg-static";
 import { MEDIA_EXTS, extOf, needsTranscode } from "./formats.js";
+import { findInstagramUrl, instagramShortcode, fetchInstagramVideo } from "./instagram.js";
 
 // --- config -----------------------------------------------------------------
 
@@ -59,6 +60,10 @@ const FILE_API = `https://api.telegram.org/file/bot${TOKEN}`;
 // Telegram's Bot API refuses to serve downloads larger than 20 MB, so we can
 // never hit OpenAI's own 25 MB upload ceiling.
 const TELEGRAM_MAX_BYTES = 20 * 1024 * 1024;
+// Instagram videos come straight from the CDN, so Telegram's limit doesn't
+// apply — but we buffer them in memory, and Render's small instances don't have
+// much of it. A reel is a few MB; 100 MB is a generous ceiling before we bail.
+const IG_MAX_BYTES = Number(process.env.INSTAGRAM_MAX_MB || 100) * 1024 * 1024;
 // Telegram messages cap at 4096 characters; leave room for the chunk counter.
 const MSG_LIMIT = 3900;
 // Past this, a wall of chunked messages is worse than a file attachment.
@@ -187,10 +192,11 @@ function extractMedia(msg) {
   return null;
 }
 
-// A per-message language override: send the file with caption "-en" or "-lv".
+// A per-message language override: send the file with caption "-en" or "-lv"
+// (or put the same flag next to a pasted link).
 function languageFor(msg) {
-  const caption = (msg.caption || "").trim().toLowerCase();
-  const m = caption.match(/(?:^|\s)-([a-z]{2})(?:\s|$)/);
+  const text = (msg.caption || msg.text || "").trim().toLowerCase();
+  const m = text.match(/(?:^|\s)-([a-z]{2})(?:\s|$)/);
   if (m) return m[1];
   return LANGUAGE;
 }
@@ -236,9 +242,11 @@ function transcodeToMp3(buf, ext) {
   }).finally(() => fs.rmSync(dir, { recursive: true, force: true }));
 }
 
-// Return { buf, filename } ready to upload, converting when we have to.
-async function prepareForUpload(buf, filename) {
-  if (!needsTranscode(filename)) return { buf, filename };
+// Return { buf, filename } ready to upload, converting when we have to. `force`
+// converts even an already-accepted container — used for Instagram video, where
+// stripping the picture track is what keeps us under the API's upload ceiling.
+async function prepareForUpload(buf, filename, force = false) {
+  if (!force && !needsTranscode(filename)) return { buf, filename };
   const ext = extOf(filename);
   log(`converting ${ext || "unknown format"} -> mp3 (${buf.length} bytes)`);
   const out = await transcodeToMp3(buf, ext);
@@ -300,11 +308,14 @@ async function handleUpdate(update) {
   }
 
   const media = extractMedia(msg);
-  if (!media) return; // random text/photo/sticker — stay silent
+  // No file? A pasted Instagram post/reel link is the other thing we act on.
+  // Anything else — plain text, photos, stickers — still gets no reply.
+  const igUrl = media ? null : findInstagramUrl(msg.text || "");
+  if (!media && !igUrl) return;
 
   const chatId = msg.chat.id;
 
-  if (media.size && media.size > TELEGRAM_MAX_BYTES) {
+  if (media?.size && media.size > TELEGRAM_MAX_BYTES) {
     await sendText(
       chatId,
       `That file is ${(media.size / 1024 / 1024).toFixed(1)} MB. Telegram only lets ` +
@@ -316,29 +327,56 @@ async function handleUpdate(update) {
 
   const status = await tgQuiet("sendMessage", {
     chat_id: chatId,
-    text: "🎧 Transcribing…",
+    text: igUrl ? "📥 Fetching the video…" : "🎧 Transcribing…",
     reply_to_message_id: msg.message_id,
   });
 
   try {
-    log(`transcribing ${media.name} (${media.size ?? "?"} bytes) for ${from}`);
-    const { buf, path: tgPath } = await downloadTelegramFile(media.fileId);
-    // Trust Telegram's stored extension over the client-supplied filename —
-    // it reflects what Telegram actually holds, and the decoder is chosen from
-    // the extension (both by ffmpeg's probe and by the OpenAI endpoint).
-    const ext = extOf(tgPath);
-    const named = ext && extOf(media.name) !== ext ? `audio${ext}` : media.name;
+    let ready;
+    let baseName;
 
-    const ready = await prepareForUpload(buf, named);
+    if (igUrl) {
+      log(`fetching instagram ${igUrl} for ${from}`);
+      const video = await fetchInstagramVideo(igUrl, IG_MAX_BYTES);
+      // Purely cosmetic progress bump — never send a fresh message for it, or a
+      // failed edit would leave a stray "Transcribing…" behind the real result.
+      if (status?.message_id)
+        await tgQuiet("editMessageText", {
+          chat_id: chatId,
+          message_id: status.message_id,
+          text: "🎧 Transcribing…",
+        });
+      // Always transcode: the download is MP4 video, and dropping the picture
+      // track is what keeps a long reel under the API's 25 MB upload ceiling.
+      ready = await prepareForUpload(video, "video.mp4", true);
+      baseName = instagramShortcode(igUrl);
+    } else {
+      log(`transcribing ${media.name} (${media.size ?? "?"} bytes) for ${from}`);
+      const { buf, path: tgPath } = await downloadTelegramFile(media.fileId);
+      // Trust Telegram's stored extension over the client-supplied filename —
+      // it reflects what Telegram actually holds, and the decoder is chosen from
+      // the extension (both by ffmpeg's probe and by the OpenAI endpoint).
+      const ext = extOf(tgPath);
+      const named = ext && extOf(media.name) !== ext ? `audio${ext}` : media.name;
+
+      ready = await prepareForUpload(buf, named);
+      baseName = media.name.replace(/\.[^.]+$/, "");
+    }
+
     const transcript = await transcribe(ready.buf, ready.filename, languageFor(msg));
 
     if (!transcript) {
-      await editOrSend(chatId, status, "No speech detected in that file.", msg.message_id);
+      await editOrSend(
+        chatId,
+        status,
+        igUrl ? "No speech detected in that video." : "No speech detected in that file.",
+        msg.message_id
+      );
       return;
     }
 
     if (transcript.length > DOC_THRESHOLD) {
-      const base = media.name.replace(/\.[^.]+$/, "") || "transcript";
+      const base = baseName || "transcript";
       await sendDocument(chatId, `${base}.txt`, transcript, msg.message_id);
       await editOrSend(
         chatId,
@@ -393,7 +431,8 @@ Send it a voice note, audio file, video, video note, or any audio/video file
 sent as a document, and it replies with a transcript. Files that the
 transcription API can't read directly are converted with ffmpeg first, so
 formats like Opus, AMR, CAF, WMA, MOV and MKV all work. Telegram caps bot
-downloads at 20 MB. Add a caption like <code>-en</code> or <code>-lv</code> to
+downloads at 20 MB. You can also just paste a public Instagram post or reel
+link — the video is fetched and transcribed the same way. Add a caption like <code>-en</code> or <code>-lv</code> to
 force a language instead of letting it auto-detect; long transcripts come back
 as a <code>.txt</code> file rather than a message.</p>
 <p>There is nothing to use on this page — the bot lives in Telegram.</p>

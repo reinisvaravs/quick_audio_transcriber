@@ -8,7 +8,7 @@ Audio and video → text. Two independent front-ends in one repo:
 | Runs on | your Mac, fully offline | Render (or anywhere with Node) |
 | Cost | free | per-minute OpenAI billing |
 | Needs | `ffmpeg` + `whisper-cpp` + a 1.5GB model | an API key, nothing installed |
-| Input | file, folder, or Instagram URL | a file sent in a Telegram chat |
+| Input | file, folder, or Instagram URL | a file or Instagram URL sent in a Telegram chat |
 
 They share nothing but this repo and `.env` — pick whichever fits. Everything
 down to [Telegram bot](#telegram-bot) covers the local CLI.
@@ -143,15 +143,19 @@ the GPU and a few CPU threads.
 
 # Telegram bot
 
-Send the bot an audio or video file; it replies with the transcript. That's the
-whole interface.
+Send the bot an audio or video file — or paste a public Instagram post/reel
+link — and it replies with the transcript. That's the whole interface.
 
 - **Whitelisted.** Only the numeric Telegram user IDs in `TELEGRAM_ALLOWED_IDS`
   get a response. Anyone else is ignored in complete silence — the bot never
   replies, so it never confirms to a stranger that it's alive.
-- **Silent on anything else.** Text, photos, stickers, links, commands: no reply.
-  Only voice notes, audio, video, video notes, and documents with an audio/video
-  type are acted on.
+- **Instagram links.** Paste a public post, reel, or IGTV URL
+  (`instagram.com/p/...`, `/reel/...`, `/tv/...`) and the video is fetched,
+  stripped to audio, and transcribed — same as the CLI's Instagram mode, and
+  sharing `instagram.js` with it. Profile and story links aren't supported.
+- **Silent on anything else.** Other text, photos, stickers, commands: no reply.
+  Only voice notes, audio, video, video notes, documents with an audio/video
+  type, and Instagram links are acted on.
 - **Any format.** The OpenAI endpoint only accepts ten containers (`flac m4a mp3
   mp4 mpeg mpga oga ogg wav webm`). Anything else — `.opus` and `.amr` voice
   notes, `.aiff`/`.caf` from Apple gear, `.wma` from Windows, `.mkv`/`.mov`/
@@ -161,13 +165,18 @@ whole interface.
   Render. (Set `FFMPEG_PATH` to use a system ffmpeg instead.)
 
 Long transcripts are split across messages; very long ones arrive as a `.txt`
-attachment. Caption a file with `-en` or `-lv` to force that language for it
-(default is auto-detect).
+attachment. Caption a file with `-en` or `-lv` — or put the same flag next to a
+pasted link — to force that language (default is auto-detect).
 
 > **Size limit:** Telegram's Bot API refuses to hand a bot any file over
-> **20 MB**, so that's the ceiling. Larger files get a short explanatory reply.
-> An hour of voice note is well under it; an hour of 1080p video is not — run
-> those through the local CLI instead.
+> **20 MB**, so that's the ceiling for uploads. Larger files get a short
+> explanatory reply. An hour of voice note is well under it; an hour of 1080p
+> video is not — run those through the local CLI instead.
+>
+> Instagram videos come from the CDN, not through Telegram, so that limit
+> doesn't apply to them; they're capped at **100 MB** instead
+> (`INSTAGRAM_MAX_MB`). They're converted to mono MP3 before upload, which takes
+> a typical 18 MB reel down to about 1 MB.
 
 ## Setup
 
