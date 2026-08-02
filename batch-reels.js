@@ -37,6 +37,7 @@ const MODEL =
 const THREADS = process.env.TRANSCRIBE_THREADS || "4";
 
 const log = (...a) => process.stderr.write(a.join(" ") + "\n");
+const mb = (buf) => (buf.length / 1024 / 1024).toFixed(1);
 const die = (msg) => {
   process.stderr.write(`\nError: ${msg}\n`);
   process.exit(1);
@@ -207,16 +208,23 @@ function outputFolderName(datasetFile, reels) {
 }
 
 // The signed CDN link is fastest but expires; the permalink always resolves.
+// Reports which route produced the buffer, because the CDN one has a second
+// failure mode that only shows up later (see NO_AUDIO).
 async function fetchVideo(reel) {
   if (reel.videoUrl) {
     try {
-      return await downloadToBuffer(reel.videoUrl);
+      return { buf: await downloadToBuffer(reel.videoUrl), viaCdn: true };
     } catch (e) {
       log(`      CDN link stale (${e.message}); resolving permalink ...`);
     }
   }
-  return fetchInstagramVideo(reel.pageUrl);
+  return { buf: await fetchInstagramVideo(reel.pageUrl), viaCdn: false };
 }
+
+// Some dataset `videoUrl`s are a DASH video-only rendition — VP9, no audio
+// track at all — so ffmpeg has nothing to write and bails with this. The
+// permalink resolver hands back the muxed H.264+AAC file instead.
+const NO_AUDIO = /does not contain any stream/i;
 
 // --- main -------------------------------------------------------------------
 
@@ -273,9 +281,18 @@ async function main() {
 
       try {
         log(`${label} — downloading ...`);
-        const buf = await fetchVideo(reel);
-        log(`${label} — transcribing ${(buf.length / 1024 / 1024).toFixed(1)} MB ...`);
-        const transcript = await transcribeBuffer(buf, args.language, workDir);
+        const { buf, viaCdn } = await fetchVideo(reel);
+        log(`${label} — transcribing ${mb(buf)} MB ...`);
+        let transcript;
+        try {
+          transcript = await transcribeBuffer(buf, args.language, workDir);
+        } catch (err) {
+          if (!viaCdn || !NO_AUDIO.test(err.message || "")) throw err;
+          log(`${label} — CDN copy has no audio track; resolving permalink ...`);
+          const muxed = await fetchInstagramVideo(reel.pageUrl);
+          log(`${label} — transcribing ${mb(muxed)} MB ...`);
+          transcript = await transcribeBuffer(muxed, args.language, workDir);
+        }
         if (!transcript) {
           log(`${label} — no speech detected, skipped.`);
           failed++;
