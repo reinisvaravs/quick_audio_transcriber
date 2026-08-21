@@ -23,6 +23,7 @@
     "start": "node bot.js",
     "bot": "node bot.js",
     "cli": "node transcribe.js",
+    "long": "node transcribe-long.js",
     "postinstall": "node -e \"require('fs').mkdirSync('output',{recursive:true})\""
   },
   "engines": {

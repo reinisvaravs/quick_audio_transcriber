@@ -13,6 +13,9 @@ models/
 # Generated transcripts (folder is created on install / at runtime)
 output/
 
+# Resumable chunk cache for transcribe-long.js
+.transcribe-cache/
+
 # macOS
 .DS_Store
 
